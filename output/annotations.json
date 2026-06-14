@@ -1,0 +1,42 @@
+[
+  {
+    "time": 5,
+    "action": "write_text",
+    "text": "A ( x₁ = 1 , y₁ = 2 )"
+  },
+  {
+    "time": 7.0,
+    "action": "write_text",
+    "text": " x₂ = 4 , y₂ = 6 "
+  },
+  {
+    "time": 15.0,
+    "action": "write_equation",
+    "text": "d = √((x2-x1)^2+ (y2-y1)^2)"
+  },
+  {
+    "time": 37,
+    "action": "write_equation",
+    "text": "d = √((4-1)^2 + (6-2)^2)"
+  },
+  {
+    "time": 46.0,
+    "action": "write_equation",
+    "text": "d = √(3^2 + 4^2)"
+  },
+  {
+    "time": 55,
+    "action": "write_equation",
+    "text": "d = √(9 + 16) = √25"
+  },
+  {
+    "time": 60.0,
+    "action": "write_equation",
+    "text": "d = 5"
+  },
+  {
+    "time": 67,
+    "action": "tick_answer",
+    "target": "C"
+  }
+]

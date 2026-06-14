@@ -1,45 +1,47 @@
 #!/usr/bin/env python3
 """
-render_video.py — Improved annotation video renderer.
+renderVideo.py — Annotation video renderer for the PW Annotation System.
 
-Key improvements over original:
-  - Easing function (ease_in_out) for natural handwriting feel
-  - Fixed wy mutation bug in _build_schedule
-  - Smarter frame cache (per-action progress rounding)
-  - Token reveal skips whitespace tokens (no wasted reveal time)
-  - Radical sign scales proportionally with font size
-  - write_equation duration clamped intelligently per token count
-  - Clean separation of geometry and rendering logic
+Key fixes vs previous version:
+  - enriched_ocr is now a plain dict (not a class). Access free_spaces and
+    index via dict keys: enriched_ocr.get("free_spaces"), enriched_ocr.get("index").
+  - _build_schedule: ocr_index fetched as enriched_ocr.get("index") dict value,
+    and find_by_text called correctly on the OCRIndex object inside it.
+  - Easing function (ease_in_out) for natural handwriting feel.
+  - Fixed wy mutation bug in _build_schedule — wy tracked as running cursor.
+  - Smarter frame cache (per-action progress rounding, bounded to 500 entries).
+  - Token reveal skips whitespace tokens (no wasted reveal time).
+  - Radical sign scales proportionally with font size.
+  - write_equation duration clamped intelligently per token count.
 """
 
 import json
-import os
-import sys
 import math
+import os
 import random
 import re
+import sys
+
 import numpy as np
+from moviepy import AudioFileClip, VideoClip, vfx
 from PIL import Image, ImageDraw, ImageFont
-from moviepy import VideoClip, AudioFileClip, vfx
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 PEN_COLOR  = (0, 0, 0)
 PEN_WIDTH  = 3
 TARGET_FPS = 24
 
+
 # ── Easing ───────────────────────────────────────────────────────────────────
-def ease_in_out(t):
-    """
-    Smooth cubic ease-in-out.
-    Starts slow, speeds up in the middle, slows at the end.
-    Makes writing look natural instead of robotic linear reveal.
-    """
+def ease_in_out(t: float) -> float:
+    """Smooth cubic ease-in-out. Makes writing look natural instead of robotic."""
     t = max(0.0, min(1.0, t))
     return t * t * (3 - 2 * t)
 
 
 # ── Font loader ──────────────────────────────────────────────────────────────
-def _find_font(family="body", size=26):
+def _find_font(family: str = "body", size: int = 26) -> ImageFont.FreeTypeFont:
     candidates = {
         "title": [
             "C:/Windows/Fonts/Inkfree.ttf",
@@ -68,14 +70,13 @@ def _find_font(family="body", size=26):
 
 
 # ── Tokenizer ────────────────────────────────────────────────────────────────
-def split_into_math_tokens(text):
+def split_into_math_tokens(text: str) -> list:
     """
-    Split equation into meaningful tokens.
-    FIX: filters out pure-whitespace tokens so they don't
-    waste reveal slots — equations reveal faster and more naturally.
+    Split equation into meaningful tokens, filtering whitespace-only tokens
+    so they don't waste reveal slots.
     """
     raw = re.findall(r'[A-Za-z0-9₀-₉⁰-⁹]+|\s+|[^\w\s]', text)
-    return [t for t in raw if t.strip()]  # skip whitespace tokens
+    return [t for t in raw if t.strip()]
 
 
 # ── Handwriting drawing primitives ───────────────────────────────────────────
@@ -110,9 +111,9 @@ def draw_progressive_circle(draw, cx, cy, radius, progress, width=PEN_WIDTH, col
 
 
 def draw_progressive_arrow(draw, x1, y1, x2, y2, progress, width=PEN_WIDTH, color=PEN_COLOR):
-    p    = ease_in_out(progress)
-    ex   = x1 + (x2 - x1) * p
-    ey   = y1 + (y2 - y1) * p
+    p  = ease_in_out(progress)
+    ex = x1 + (x2 - x1) * p
+    ey = y1 + (y2 - y1) * p
     _jitter_line(draw, x1, y1, ex, ey, width, color)
     if progress > 0.8:
         dx, dy = x2 - x1, y2 - y1
@@ -131,8 +132,11 @@ def draw_progressive_slash(draw, x1, y1, x2, y2, progress, width=PEN_WIDTH, colo
 
 
 # ── Text drawing with subscript/superscript support ──────────────────────────
-SUPERSCRIPTS = {'⁰':'0','¹':'1','²':'2','³':'3','⁴':'4',
-                '⁵':'5','⁶':'6','⁷':'7','⁸':'8','⁹':'9'}
+SUPERSCRIPTS = {
+    '⁰': '0', '¹': '1', '²': '2', '³': '3', '⁴': '4',
+    '⁵': '5', '⁶': '6', '⁷': '7', '⁸': '8', '⁹': '9',
+}
+
 
 def _sub_font(font):
     try:
@@ -169,7 +173,8 @@ def text_width(draw, text, font):
     sf = _sub_font(font)
     w  = 0
     for ch in text:
-        if ch == '−': ch = '-'
+        if ch == '−':
+            ch = '-'
         if '₀' <= ch <= '₉':
             w += draw.textlength(str(ord(ch) - 0x2080), font=sf)
         elif ch in SUPERSCRIPTS:
@@ -182,18 +187,17 @@ def text_width(draw, text, font):
 # ── Radical renderer ─────────────────────────────────────────────────────────
 def draw_math_with_radicals(draw, x, y, text, font, color):
     """
-    Render math text, replacing √ with a properly scaled
-    hand-drawn radical sign instead of a missing-glyph box.
-    FIX: radical dimensions now scale with font.size.
+    Render math text, replacing √ with a properly scaled hand-drawn
+    radical sign. Radical dimensions scale with font.size.
     """
     if "√" not in text:
         draw_custom_text(draw, x, y, text, font, color)
         return
 
     fs     = font.size
-    tail_h = int(fs * 0.55)   # height of the tail below baseline
-    head_h = int(fs * 0.85)   # height of the overline above baseline
-    tick_w = int(fs * 0.55)   # horizontal width of the tick part
+    tail_h = int(fs * 0.55)
+    head_h = int(fs * 0.85)
+    tick_w = int(fs * 0.55)
 
     parts  = text.split("√")
     curr_x = x
@@ -204,14 +208,16 @@ def draw_math_with_radicals(draw, x, y, text, font, color):
                 curr_x += draw_custom_text(draw, curr_x, y, part, font, color)
             continue
 
-        # Parse inside the radical
         if part.startswith("("):
             depth, closing = 0, -1
             for ci, ch in enumerate(part):
-                if ch == "(": depth += 1
+                if ch == "(":
+                    depth += 1
                 elif ch == ")":
                     depth -= 1
-                    if depth == 0: closing = ci; break
+                    if depth == 0:
+                        closing = ci
+                        break
             if closing != -1:
                 inside, rest = part[1:closing], part[closing + 1:]
             else:
@@ -225,17 +231,16 @@ def draw_math_with_radicals(draw, x, y, text, font, color):
 
         iw = text_width(draw, inside, font) if inside else 0
 
-        # Radical strokes (scaled)
-        r_x0, r_y0 = curr_x,              y + tail_h // 2
-        r_x1, r_y1 = curr_x + tick_w // 4, y + tail_h
-        r_x2, r_y2 = curr_x + tick_w // 2, y + tail_h
-        r_x3, r_y3 = curr_x + tick_w,       y - head_h + fs
+        r_x0, r_y0 = curr_x,                y + tail_h // 2
+        r_x1, r_y1 = curr_x + tick_w // 4,  y + tail_h
+        r_x2, r_y2 = curr_x + tick_w // 2,  y + tail_h
+        r_x3, r_y3 = curr_x + tick_w,        y - head_h + fs
         r_x4, r_y4 = curr_x + tick_w + int(iw) + 4, y - head_h + fs
 
         draw.line(
             [(r_x0, r_y0), (r_x1, r_y1), (r_x2, r_y2),
              (r_x3, r_y3), (r_x4, r_y4)],
-            fill=color, width=2, joint="round"
+            fill=color, width=2, joint="round",
         )
 
         if inside:
@@ -246,24 +251,37 @@ def draw_math_with_radicals(draw, x, y, text, font, color):
 
 
 # ── Schedule builder ─────────────────────────────────────────────────────────
-def _build_schedule(annotations, total_duration, enriched_ocr, option_positions, draw_ref, font):
+def _build_schedule(
+    annotations:      list,
+    total_duration:   float,
+    enriched_ocr:     dict,
+    option_positions: dict,
+    draw_ref,
+    font,
+) -> list:
     """
     Compute geometry and timing for every annotation.
-    FIX: wy is now tracked as a running cursor correctly across both passes.
+
+    FIX: enriched_ocr is now a plain dict — access via dict keys.
+    FIX: wy tracked as a running cursor correctly across passes.
     FIX: write_equation duration based on token count, not just segment gap.
     """
-    ocr_index   = (enriched_ocr or {}).get("index")
-    free_spaces = (enriched_ocr or {}).get("free_spaces", [])
+    enriched_ocr = enriched_ocr or {}
+
+    # --- OCR index (OCRIndex object, or None) --------------------------------
+    ocr_index   = enriched_ocr.get("index")     # OCRIndex instance or None
+    free_spaces = enriched_ocr.get("free_spaces", [])
 
     if free_spaces:
-        rx1, ry1, rx2, ry2 = free_spaces[0]["bounds"]
+        # FreeSpace.bounds is (x1, y1, x2, y2)
+        bounds = free_spaces[0].bounds if hasattr(free_spaces[0], "bounds") else free_spaces[0]
+        rx1, ry1, rx2, ry2 = bounds
     else:
         rx1, ry1, rx2, ry2 = 200, 420, 1150, 630
 
-    # Writing cursor starts at top-left of free space
-    wx = rx1 + 20
-    wy = ry1 + 30
-    LINE_GAP = 62  # pixels between annotation lines
+    wx       = rx1 + 20
+    wy       = ry1 + 30
+    LINE_GAP = 62
 
     schedule = []
 
@@ -272,7 +290,7 @@ def _build_schedule(annotations, total_duration, enriched_ocr, option_positions,
         t      = ann["time"]
         entry  = {**ann, "write_start": t}
 
-        # ── Next annotation time (for duration stretching) ──
+        # Next annotation time (for duration stretching)
         t_next = total_duration - 1.0
         for j in range(i + 1, len(annotations)):
             t_next = annotations[j]["time"]
@@ -282,20 +300,27 @@ def _build_schedule(annotations, total_duration, enriched_ocr, option_positions,
         if action == "write_equation":
             tokens    = split_into_math_tokens(ann.get("text", ""))
             n_tokens  = len(tokens)
-            # Natural speed: ~2 tokens/sec, clamped to segment gap
             natural   = n_tokens / 2.0
             write_dur = max(1.5, min(natural, segment_gap * 0.88))
             entry["write_pos"]      = (wx, wy)
             entry["write_duration"] = write_dur
             entry["write_end"]      = t + write_dur
-            wy += LINE_GAP  # advance cursor for next line
+            wy += LINE_GAP
+
+        elif action == "write_text":
+            tokens    = ann.get("text", "").split()
+            n_tokens  = len(tokens)
+            write_dur = max(1.0, min(n_tokens * 0.4, segment_gap * 0.88))
+            entry["write_pos"]      = (wx, wy)
+            entry["write_duration"] = write_dur
+            entry["write_end"]      = t + write_dur
+            wy += LINE_GAP
 
         elif action == "underline_existing":
             target = ann.get("target", "")
             entry["underline_duration"] = 0.8
-            entry["write_end"] = t + 0.8
-            # Fallback coords based on common patterns
-            if ocr_index:
+            entry["write_end"]          = t + 0.8
+            if ocr_index and target:
                 matches = ocr_index.find_by_text(target, threshold=0.4)
                 if matches:
                     elem = matches[0]
@@ -306,27 +331,44 @@ def _build_schedule(annotations, total_duration, enriched_ocr, option_positions,
                 entry["underline_params"] = (60, 117, 300, 117)
 
         elif action == "circle_existing":
+            target = ann.get("target", "")
             entry["circle_duration"] = 0.8
-            entry["write_end"] = t + 0.8
-            entry["circle_params"] = (145, 91, 30)
+            entry["write_end"]       = t + 0.8
+            if ocr_index and target:
+                matches = ocr_index.find_by_text(target, threshold=0.4)
+                if matches:
+                    elem   = matches[0]
+                    cx     = int((elem.x1 + elem.x2) / 2)
+                    cy     = int((elem.y1 + elem.y2) / 2)
+                    radius = max(20, int(max(elem.x2 - elem.x1, elem.y2 - elem.y1) / 2) + 8)
+                    entry["circle_params"] = (cx, cy, radius)
+                else:
+                    entry["circle_params"] = (145, 91, 30)
+            else:
+                entry["circle_params"] = (145, 91, 30)
 
         elif action == "draw_arrow":
             entry["arrow_duration"] = 0.6
-            entry["write_end"] = t + 0.6
-            entry["arrow_params"] = (wx + 60, wy - LINE_GAP - 10, wx + 60, wy - 10)
+            entry["write_end"]      = t + 0.6
+            entry["arrow_params"]   = (wx + 60, wy - LINE_GAP - 10, wx + 60, wy - 10)
 
         elif action == "tick_answer":
-            target    = (ann.get("target") or ann.get("option", "")).strip().upper()
+            target     = (ann.get("target") or ann.get("option", "")).strip().upper()
             opt_letter = target.replace("OPTION", "").strip()
             entry["tick_duration"] = 0.5
             entry["write_end"]     = t + 0.5
             if opt_letter in option_positions:
                 bbox = option_positions[opt_letter]
-                xs   = [p[0] for p in bbox]; ys = [p[1] for p in bbox]
+                xs   = [p[0] for p in bbox]
+                ys   = [p[1] for p in bbox]
                 ox1, oy1, ox2, oy2 = min(xs), min(ys), max(xs), max(ys)
                 entry["tick_params"] = (ox1 - 4, oy2 + 4, ox1 + 42, oy1 - 4)
             else:
                 entry["tick_params"] = (18, 300, 69, 240)
+
+        else:
+            # Unknown action type — add minimal entry so it doesn't crash
+            entry["write_end"] = t + 0.5
 
         schedule.append(entry)
 
@@ -335,10 +377,19 @@ def _build_schedule(annotations, total_duration, enriched_ocr, option_positions,
 
 # ── Frame renderer ────────────────────────────────────────────────────────────
 def _render_frame(t, background, schedule, fonts):
-    font = fonts[0]
+    font  = fonts[0]
     frame = Image.new("RGB", background.size, (255, 255, 255))
     frame.paste(background, (0, 0))
     draw  = ImageDraw.Draw(frame, "RGBA")
+
+    _DUR_KEYS = {
+        "write_equation":     "write_duration",
+        "write_text":         "write_duration",
+        "underline_existing": "underline_duration",
+        "circle_existing":    "circle_duration",
+        "draw_arrow":         "arrow_duration",
+        "tick_answer":        "tick_duration",
+    }
 
     for ann in schedule:
         if t < ann["write_start"]:
@@ -346,16 +397,12 @@ def _render_frame(t, background, schedule, fonts):
 
         action   = ann["action"]
         end      = ann["write_end"]
-        dur_key  = {"write_equation":    "write_duration",
-                     "underline_existing":"underline_duration",
-                     "circle_existing":   "circle_duration",
-                     "draw_arrow":        "arrow_duration",
-                     "tick_answer":       "tick_duration"}.get(action, "write_duration")
+        dur_key  = _DUR_KEYS.get(action, "write_duration")
         duration = ann.get(dur_key, 1.0)
         raw_p    = 1.0 if t >= end else (t - ann["write_start"]) / max(duration, 0.01)
         progress = ease_in_out(raw_p)
 
-        if action == "write_equation":
+        if action in ("write_equation", "write_text"):
             text   = ann.get("text", "")
             wx, wy = ann["write_pos"]
             tokens = split_into_math_tokens(text)
@@ -388,11 +435,7 @@ def _render_frame(t, background, schedule, fonts):
 
 # ── Frame cache ───────────────────────────────────────────────────────────────
 def _cache_key(t, schedule):
-    """
-    FIX: Instead of returning None during active drawing (causing full re-render),
-    round progress to 2 decimal places as cache key — dramatically reduces
-    redundant renders while still animating smoothly.
-    """
+    """Round progress to 2 dp as cache key — reduces redundant renders."""
     key_parts = []
     for ann in schedule:
         if t < ann["write_start"]:
@@ -400,18 +443,43 @@ def _cache_key(t, schedule):
         elif t >= ann["write_end"]:
             key_parts.append("done")
         else:
-            dur = ann.get("write_duration") or ann.get("underline_duration") or \
-                  ann.get("circle_duration") or ann.get("arrow_duration") or \
-                  ann.get("tick_duration") or 1.0
-            p = round((t - ann["write_start"]) / max(dur, 0.01), 2)
+            action  = ann["action"]
+            dur_key = {
+                "write_equation":     "write_duration",
+                "write_text":         "write_duration",
+                "underline_existing": "underline_duration",
+                "circle_existing":    "circle_duration",
+                "draw_arrow":         "arrow_duration",
+                "tick_answer":        "tick_duration",
+            }.get(action, "write_duration")
+            dur = ann.get(dur_key, 1.0)
+            p   = round((t - ann["write_start"]) / max(dur, 0.01), 2)
             key_parts.append(f"active_{p}")
     return tuple(key_parts)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-def render_video(image_path, annotations_path, audio_path, output_path,
-                 option_positions=None, question_bbox=None, enriched_ocr=None):
+def render_video(
+    image_path:       str,
+    annotations_path: str,
+    audio_path:       str,
+    output_path:      str,
+    option_positions: dict | None = None,
+    question_bbox:    tuple | None = None,
+    enriched_ocr:     dict | None = None,
+):
+    """
+    Render the final annotated video.
 
+    Args:
+        image_path:       Background question image.
+        annotations_path: JSON file of timed annotation actions.
+        audio_path:       Narration audio file.
+        output_path:      Where to write the output MP4.
+        option_positions: {letter: bbox} from OCR (for tick_answer).
+        question_bbox:    (x1, y1, x2, y2) of question region (unused directly).
+        enriched_ocr:     Dict with "index" and "free_spaces" keys from ocrUtils.
+    """
     option_positions = option_positions or {}
     enriched_ocr     = enriched_ocr or {}
 
@@ -426,18 +494,18 @@ def render_video(image_path, annotations_path, audio_path, output_path,
     audio          = AudioFileClip(audio_path)
     total_duration = audio.duration
 
-    # Dummy draw for text measurement in schedule builder
-    dummy = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    schedule = _build_schedule(annotations, total_duration, enriched_ocr,
-                               option_positions, dummy, font)
+    dummy    = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    schedule = _build_schedule(
+        annotations, total_duration, enriched_ocr,
+        option_positions, dummy, font,
+    )
 
-    frame_cache = {}
+    frame_cache: dict = {}
 
     def make_frame(t):
         key = _cache_key(t, schedule)
         if key not in frame_cache:
             frame_cache[key] = _render_frame(t, background, schedule, fonts)
-            # Keep cache bounded
             if len(frame_cache) > 500:
                 oldest = next(iter(frame_cache))
                 del frame_cache[oldest]
@@ -449,6 +517,7 @@ def render_video(image_path, annotations_path, audio_path, output_path,
     video = video.with_effects([vfx.FadeIn(0.6), vfx.FadeOut(0.6)])
     video = video.with_audio(audio)
 
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     video.write_videofile(
         output_path,
         fps=TARGET_FPS,

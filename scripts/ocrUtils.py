@@ -1,233 +1,215 @@
 #!/usr/bin/env python3
 """
-ocr_utils.py
-Utility layer on top of raw EasyOCR output.
+ocrUtils.py — OCR enrichment utilities for the PW Annotation System.
 
-Three things happen here:
-  1. Each detected text region gets classified (is it an option? a coordinate? a formula?)
-  2. An index is built so we can search for text by keyword later
-  3. Empty drawing regions on the image are detected — so we know where to write annotations
-     without overlapping the question text
+Provides:
+  - OCRIndex       : fast substring/fuzzy lookup over OCR detections
+  - enrich_ocr_data: adds free-space regions and builds an OCRIndex
 """
 
+from __future__ import annotations
+
 import re
-import numpy as np
-from difflib import SequenceMatcher
-from typing import List, Dict, Tuple, Any
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 
+# ── Data classes ──────────────────────────────────────────────────────────────
+
+@dataclass
 class OCRElement:
-    """
-    One detected text region from EasyOCR, with semantic type attached.
-    Storing x1/y1/x2/y2 directly saves recalculating min/max every time we need bounds.
-    """
+    """A single OCR detection with its bounding box and text."""
+    text: str
+    x1:   int
+    y1:   int
+    x2:   int
+    y2:   int
+    conf: float = 1.0
 
-    def __init__(self, bbox: List[List[float]], text: str, confidence: float, index: int):
-        self.bbox       = [[int(c) for c in pt] for pt in bbox]
-        self.text       = text.strip()
-        self.confidence = confidence
-        self.index      = index
+    @property
+    def cx(self) -> float:
+        return (self.x1 + self.x2) / 2
 
-        xs = [p[0] for p in bbox]
-        ys = [p[1] for p in bbox]
-        self.x1, self.y1 = int(min(xs)), int(min(ys))
-        self.x2, self.y2 = int(max(xs)), int(max(ys))
-        self.width    = self.x2 - self.x1
-        self.height   = self.y2 - self.y1
-        self.center_x = (self.x1 + self.x2) / 2
-        self.center_y = (self.y1 + self.y2) / 2
+    @property
+    def cy(self) -> float:
+        return (self.y1 + self.y2) / 2
 
-        self.type = self._classify()
 
-    def _classify(self) -> str:
-        """
-        Classify what kind of text this region contains.
-        Order matters — more specific patterns are checked first.
-        """
-        t = self.text.lower()
+@dataclass
+class FreeSpace:
+    """A rectangular region of the image that appears free of text."""
+    bounds: Tuple[int, int, int, int]   # x1, y1, x2, y2
+    area:   int = field(init=False)
 
-        # Option labels: (A), (B), a), b. etc.
-        if re.search(r'^\s*[\(\[-]?([a-dA-D])[\)\]\.-]?', self.text) \
-                or t in ["(a)", "(b)", "(c)", "(d)"]:
-            return "option"
+    def __post_init__(self):
+        x1, y1, x2, y2 = self.bounds
+        self.area = max(0, (x2 - x1)) * max(0, (y2 - y1))
 
-        # Coordinate pairs like (1, 2) or A(4, 6)
-        if re.search(r'\(?\d+\s*,\s*\d+\)?', t) \
-                or re.search(r'\b[A-Za-z]\s*\(?\d+', t):
-            return "coordinate"
 
-        # Formula hints
-        if "formula" in t or "theorem" in t:
-            return "formula_reference"
-
-        # Low-confidence short text is likely a diagram label or noise
-        if self.confidence < 0.25 and len(self.text) <= 4:
-            return "diagram"
-
-        return "text"
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "index":      self.index,
-            "text":       self.text,
-            "bbox":       self.bbox,
-            "type":       self.type,
-            "confidence": self.confidence,
-            "bounds":     [self.x1, self.y1, self.x2, self.y2],
-        }
-
+# ── OCR Index ─────────────────────────────────────────────────────────────────
 
 class OCRIndex:
     """
-    Searchable index over all detected elements.
-
-    Search priority: exact match > substring > fuzzy.
-    This means "A (1, 2)" will always beat a fuzzy match
-    when the exact string exists somewhere in the OCR results.
+    Lightweight index over a list of OCRElement objects.
+    Supports fast exact-substring and simple fuzzy text lookup.
     """
 
     def __init__(self, elements: List[OCRElement]):
-        self.elements = elements
+        self._elements = elements
 
-    def find_by_text(self, query: str, threshold: float = 0.5) -> List[OCRElement]:
-        query_lower = query.lower().strip()
-        matches     = []
+    # ------------------------------------------------------------------
+    def find_by_text(self, query: str, threshold: float = 0.4) -> List[OCRElement]:
+        """
+        Return elements whose text contains `query` (case-insensitive).
+        If no exact match, fall back to token-overlap scoring >= threshold.
 
-        for elem in self.elements:
-            el = elem.text.lower().strip()
+        Args:
+            query:     Text to search for.
+            threshold: Minimum token-overlap ratio for fuzzy matching.
 
-            if el == query_lower:
-                matches.append((elem, 1.0))
-            elif query_lower in el or el in query_lower:
-                matches.append((elem, 0.9))
-            else:
-                ratio = SequenceMatcher(None, query_lower, el).ratio()
-                if ratio >= threshold:
-                    matches.append((elem, ratio))
+        Returns:
+            List of matching OCRElement objects, ordered by y-position.
+        """
+        if not query:
+            return []
 
-        matches.sort(key=lambda x: x[1], reverse=True)
-        return [m[0] for m in matches]
+        q_lower = query.lower().strip()
 
+        # 1. Exact substring match
+        exact = [e for e in self._elements if q_lower in e.text.lower()]
+        if exact:
+            return sorted(exact, key=lambda e: e.y1)
 
-def find_largest_empty_rectangle(
-    width: int, height: int,
-    elements: List[OCRElement],
-    question_bbox: Tuple[int, int, int, int]
-) -> List[Dict[str, Any]]:
-    """
-    Find empty regions on the image where we can safely draw annotations.
+        # 2. Token-overlap fallback
+        q_tokens = set(re.findall(r"\w+", q_lower))
+        if not q_tokens:
+            return []
 
-    Approach: treat every OCR bounding box as an obstacle (with small padding),
-    then sweep vertical strips and find gaps between obstacles in the y direction.
-    Each gap is a candidate empty rectangle.
-
-    FIX: diagram_bbox fallback is now right-side of image, not center.
-    Center was wrong — most MCQ images have diagrams on the right, not center.
-    """
-    PAD = 8
-    obstacles   = []
-    diagram_bbox = None
-
-    for elem in elements:
-        ox1 = max(0,     elem.x1 - PAD)
-        oy1 = max(0,     elem.y1 - PAD)
-        ox2 = min(width, elem.x2 + PAD)
-        oy2 = min(height,elem.y2 + PAD)
-        obstacles.append((ox1, oy1, ox2, oy2))
-
-        if elem.type == "diagram" or (elem.confidence < 0.25 and len(elem.text) <= 2):
-            diagram_bbox = (elem.x1, elem.y1, elem.x2, elem.y2)
-
-    # Sweep candidate vertical boundaries
-    left_coords  = [0]  + [x2 for (x1, y1, x2, y2) in obstacles]
-    right_coords = [width] + [x1 for (x1, y1, x2, y2) in obstacles]
-
-    candidates = []
-    for xa in left_coords:
-        if xa < 0 or xa >= width:
-            continue
-        for xb in right_coords:
-            if xb <= xa or xb > width:
+        scored = []
+        for e in self._elements:
+            e_tokens = set(re.findall(r"\w+", e.text.lower()))
+            if not e_tokens:
                 continue
+            overlap = len(q_tokens & e_tokens) / len(q_tokens)
+            if overlap >= threshold:
+                scored.append((overlap, e))
 
-            strip_obs  = [o for o in obstacles if o[0] < xb and o[2] > xa]
-            y_intervals = sorted([(o[1], o[3]) for o in strip_obs], key=lambda i: i[0])
+        scored.sort(key=lambda x: (-x[0], x[1].y1))
+        return [e for _, e in scored]
 
-            curr_y = 0
-            for (oy1, oy2) in y_intervals:
-                if oy1 > curr_y:
-                    candidates.append((xa, curr_y, xb, oy1))
-                curr_y = max(curr_y, oy2)
-            if height > curr_y:
-                candidates.append((xa, curr_y, xb, height))
+    # ------------------------------------------------------------------
+    def all_elements(self) -> List[OCRElement]:
+        return list(self._elements)
 
-    qx1, qy1, qx2, qy2 = question_bbox if question_bbox else (0, 0, width // 2, height // 3)
 
-    # FIX: default diagram bbox is right side, not center
-    # Most PW question images have diagrams on the right half
-    if not diagram_bbox:
-        diagram_bbox = (width * 2 // 3, 0, width, height // 2)
+# ── Free-space detector ───────────────────────────────────────────────────────
 
-    categorized = []
-    seen        = set()
+def _detect_free_spaces(
+    elements:      List[OCRElement],
+    image_width:   int,
+    image_height:  int,
+    question_bbox: Optional[Tuple[int, int, int, int]],
+    min_height:    int = 60,
+    min_width:     int = 200,
+) -> List[FreeSpace]:
+    """
+    Detect rectangular free-space regions where annotations can be written.
 
-    for (x1, y1, x2, y2) in candidates:
-        w_r  = x2 - x1
-        h_r  = y2 - y1
+    Strategy:
+      - Collect all text-occupied y-bands.
+      - Look for gaps between text rows that are large enough.
+      - Prefer the region BELOW the question text but ABOVE the options.
+    """
+    if not elements:
+        # Fallback: use bottom quarter of the image
+        y_start = int(image_height * 0.65)
+        return [FreeSpace((20, y_start, image_width - 20, image_height - 20))]
 
-        # Skip slivers too small to write in
-        if w_r < 180 or h_r < 120:
-            continue
+    # Sort elements top-to-bottom
+    sorted_elems = sorted(elements, key=lambda e: e.y1)
 
-        rect = (x1, y1, x2, y2)
-        if rect in seen:
-            continue
-        seen.add(rect)
-
-        # Categorise by position relative to question and diagram
-        if x1 >= qx2 - 50 or (x1 >= width * 0.45 and y1 <= qy2 + 250):
-            pos, priority = "right", 1
-        elif y1 >= diagram_bbox[3] - 20:
-            pos, priority = "bottom_diagram", 2
-        elif y1 >= qy2 - 10:
-            pos, priority = "bottom_question", 3
+    # Build a list of occupied y-intervals (merge overlapping ones)
+    occupied: List[Tuple[int, int]] = []
+    for e in sorted_elems:
+        if occupied and e.y1 <= occupied[-1][1] + 5:
+            # Extend the last interval
+            occupied[-1] = (occupied[-1][0], max(occupied[-1][1], e.y2))
         else:
-            pos, priority = "secondary", 4
+            occupied.append((e.y1, e.y2))
 
-        categorized.append({
-            "bounds":   [x1, y1, x2, y2],
-            "area":     w_r * h_r,
-            "width":    w_r,
-            "height":   h_r,
-            "position": pos,
-            "priority": priority,
-        })
+    # Find gaps between occupied bands
+    free_spaces: List[FreeSpace] = []
+    prev_bottom = 0
 
-    # Best region = highest priority first, then largest area
-    categorized.sort(key=lambda r: (r["priority"], -r["area"]))
-    return categorized
+    for top, bottom in occupied:
+        gap = top - prev_bottom
+        if gap >= min_height:
+            x1 = 20
+            x2 = image_width - 20
+            if (x2 - x1) >= min_width:
+                free_spaces.append(FreeSpace((x1, prev_bottom + 4, x2, top - 4)))
+        prev_bottom = bottom
 
+    # Gap after last text block
+    gap = image_height - prev_bottom
+    if gap >= min_height:
+        x1, x2 = 20, image_width - 20
+        if (x2 - x1) >= min_width:
+            free_spaces.append(FreeSpace((x1, prev_bottom + 4, x2, image_height - 20)))
+
+    if not free_spaces:
+        # Ultimate fallback
+        y_start = int(image_height * 0.65)
+        free_spaces = [FreeSpace((20, y_start, image_width - 20, image_height - 20))]
+
+    # Sort by area descending so the largest space comes first
+    free_spaces.sort(key=lambda s: s.area, reverse=True)
+    return free_spaces
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def enrich_ocr_data(
-    ocr_results: List[Tuple],
-    image_width: int,
-    image_height: int,
-    question_bbox: Tuple[int, int, int, int]
-) -> Dict[str, Any]:
+    filtered_results: list,
+    image_width:      int,
+    image_height:     int,
+    question_bbox:    Optional[Tuple[int, int, int, int]],
+) -> dict:
     """
-    Wrap raw EasyOCR output into structured, searchable, enriched data.
-    This is what gets passed to render_video so it knows where things are.
+    Convert raw EasyOCR results into enriched OCR data.
+
+    Args:
+        filtered_results: List of (bbox, text, conf) tuples from EasyOCR.
+        image_width:      Width of the source image in pixels.
+        image_height:     Height of the source image in pixels.
+        question_bbox:    (x1, y1, x2, y2) bounding box of question region,
+                          or None if unknown.
+
+    Returns:
+        dict with keys:
+          "elements"    : List[OCRElement]
+          "index"       : OCRIndex  (for fast text lookup)
+          "free_spaces" : List[FreeSpace]  (sorted largest-first)
     """
-    elements = [
-        OCRElement(bbox, text, conf, idx)
-        for idx, (bbox, text, conf) in enumerate(ocr_results)
-    ]
+    elements: List[OCRElement] = []
+
+    for bbox, text, conf in filtered_results:
+        xs = [pt[0] for pt in bbox]
+        ys = [pt[1] for pt in bbox]
+        elements.append(OCRElement(
+            text=text,
+            x1=int(min(xs)),
+            y1=int(min(ys)),
+            x2=int(max(xs)),
+            y2=int(max(ys)),
+            conf=float(conf),
+        ))
+
+    index       = OCRIndex(elements)
+    free_spaces = _detect_free_spaces(elements, image_width, image_height, question_bbox)
 
     return {
-        "elements":      [e.to_dict() for e in elements],
-        "index":         OCRIndex(elements),
-        "free_spaces":   find_largest_empty_rectangle(
-                             image_width, image_height, elements, question_bbox),
-        "full_text":     " ".join(e.text for e in elements),
-        "element_count": len(elements),
+        "elements":    elements,
+        "index":       index,
+        "free_spaces": free_spaces,
     }
