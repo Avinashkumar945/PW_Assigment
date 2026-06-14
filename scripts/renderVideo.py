@@ -51,6 +51,7 @@ def _find_font(family: str = "body", size: int = 26) -> ImageFont.FreeTypeFont:
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         ],
         "body": [
+            "C:/Windows/Fonts/BRADHITC.TTF",
             "C:/Windows/Fonts/Inkfree.ttf",
             "C:/Windows/Fonts/segoepr.ttf",
             "C:/Windows/Fonts/comic.ttf",
@@ -183,73 +184,85 @@ def text_width(draw, text, font):
             w += draw.textlength(ch, font=font)
     return w
 
+                                                                                                                                                                                                                                                                            
+def _parse_radicand(part):
+      """√ ke baad ka text parse karke (inside, rest) return karta hai."""
+      if part.startswith("("):
+          depth, closing = 0, -1
+          for ci, ch in enumerate(part):
+              if ch == "(":
+                  depth += 1
+              elif ch == ")":
+                  depth -= 1
+                  if depth == 0:
+                      closing = ci
+                      break
+          if closing != -1:
+              return part[1:closing], part[closing + 1:]
+          else:
+              return part[1:], ""
+      else:
+          m = re.match(r'^[0-9]+', part)
+          if m:
+              return m.group(0), part[len(m.group(0)):]
+          else:
+              return part, ""
 
 # ── Radical renderer ─────────────────────────────────────────────────────────
-def draw_math_with_radicals(draw, x, y, text, font, color):
-    """
-    Render math text, replacing √ with a properly scaled hand-drawn
-    radical sign. Radical dimensions scale with font.size.
-    """
-    if "√" not in text:
-        draw_custom_text(draw, x, y, text, font, color)
-        return
 
-    fs     = font.size
-    tail_h = int(fs * 0.55)
-    head_h = int(fs * 0.85)
-    tick_w = int(fs * 0.55)
+def draw_math_with_radicals(draw, x, y, text, font, color, full_text=None):
+      if "√" not in text:
+          draw_custom_text(draw, x, y, text, font, color)
+          return
 
-    parts  = text.split("√")
-    curr_x = x
+      fs     = font.size
+      tail_h = int(fs * 0.55)
+      head_h = int(fs * 0.85)
+      tick_w = int(fs * 0.55)
 
-    for idx, part in enumerate(parts):
-        if idx == 0:
-            if part:
-                curr_x += draw_custom_text(draw, curr_x, y, part, font, color)
-            continue
+      parts     = text.split("√")
+      bar_parts = (full_text.split("√")
+                   if full_text and "√" in full_text
+                   else parts)
+      curr_x = x
 
-        if part.startswith("("):
-            depth, closing = 0, -1
-            for ci, ch in enumerate(part):
-                if ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        closing = ci
-                        break
-            if closing != -1:
-                inside, rest = part[1:closing], part[closing + 1:]
-            else:
-                inside, rest = part[1:], ""
-        else:
-            m = re.match(r'^[0-9]+', part)
-            if m:
-                inside, rest = m.group(0), part[len(m.group(0)):]
-            else:
-                inside, rest = part, ""
+      for idx, part in enumerate(parts):
+          if idx == 0:
+              if part:
+                  curr_x += draw_custom_text(draw, curr_x, y, part, font, color)
+              continue
 
-        iw = text_width(draw, inside, font) if inside else 0
+          inside, rest = _parse_radicand(part)
 
-        r_x0, r_y0 = curr_x,                y + tail_h // 2
-        r_x1, r_y1 = curr_x + tick_w // 4,  y + tail_h
-        r_x2, r_y2 = curr_x + tick_w // 2,  y + tail_h
-        r_x3, r_y3 = curr_x + tick_w,        y - head_h + fs
-        r_x4, r_y4 = curr_x + tick_w + int(iw) + 4, y - head_h + fs
+          # FULL text se bar width calculate karo — yahi fix hai
+          if idx < len(bar_parts):
+              full_inside, _ = _parse_radicand(bar_parts[idx])
+          else:
+              full_inside = inside
 
-        draw.line(
-            [(r_x0, r_y0), (r_x1, r_y1), (r_x2, r_y2),
-             (r_x3, r_y3), (r_x4, r_y4)],
-            fill=color, width=2, joint="round",
-        )
+          full_iw = text_width(draw, full_inside, font) if full_inside else 0
 
-        if inside:
-            draw_custom_text(draw, curr_x + tick_w + 2, y, inside, font, color)
-            curr_x += tick_w + iw + 8
-        if rest:
-            curr_x += draw_custom_text(draw, curr_x, y, rest, font, color)
+          # Radical sign draw karo — bar FULL width ka hoga
+          r_x0, r_y0 = curr_x,                y + tail_h // 2
+          r_x1, r_y1 = curr_x + tick_w // 4,  y + tail_h
+          r_x2, r_y2 = curr_x + tick_w // 2,  y + tail_h
+          r_x3, r_y3 = curr_x + tick_w,        y - head_h + fs
+          r_x4, r_y4 = curr_x + tick_w + int(full_iw) + 4, y - head_h + fs
 
+          draw.line(
+              [(r_x0, r_y0), (r_x1, r_y1), (r_x2, r_y2),
+               (r_x3, r_y3), (r_x4, r_y4)],
+              fill=color, width=2, joint="round",
+          )
 
+          if inside:
+              draw_custom_text(draw, curr_x + tick_w + 2, y, inside, font, color)
+
+          curr_x += tick_w + int(full_iw) + 8
+          if rest:
+              curr_x += draw_custom_text(draw, curr_x, y, rest, font, color)
+              
+              
 # ── Schedule builder ─────────────────────────────────────────────────────────
 def _build_schedule(
     annotations:      list,
@@ -258,6 +271,8 @@ def _build_schedule(
     option_positions: dict,
     draw_ref,
     font,
+    image_size:      tuple | None = None,
+    question_bbox:   tuple | None = None,
 ) -> list:
     """
     Compute geometry and timing for every annotation.
@@ -279,9 +294,14 @@ def _build_schedule(
     else:
         rx1, ry1, rx2, ry2 = 200, 420, 1150, 630
 
-    wx       = rx1 + 20
-    wy       = ry1 + 30
-    LINE_GAP = 62
+    img_w, img_h = image_size if image_size else (rx2, ry2)
+    centered_x   = int(img_w * 0.32)
+    # centered_y   = int(img_h * 0.16)
+    centered_y   = int(img_h * 0.16)-2
+    wx           = min(max(centered_x, rx1 + 20), max(rx2 - 220, rx1 + 20))
+    wy           = centered_y
+    # wy          = max(ry1 + 20, centered_y)
+    LINE_GAP      = 62
 
     schedule = []
 
@@ -374,7 +394,6 @@ def _build_schedule(
 
     return schedule
 
-
 # ── Frame renderer ────────────────────────────────────────────────────────────
 def _render_frame(t, background, schedule, fonts):
     font  = fonts[0]
@@ -403,13 +422,12 @@ def _render_frame(t, background, schedule, fonts):
         progress = ease_in_out(raw_p)
 
         if action in ("write_equation", "write_text"):
-            text   = ann.get("text", "")
-            wx, wy = ann["write_pos"]
-            tokens = split_into_math_tokens(text)
-            k      = max(1, int(progress * len(tokens)))
-            partial = "".join(tokens[:k])
-            draw_math_with_radicals(draw, wx, wy, partial, font, PEN_COLOR)
-
+              full_text = ann.get("text", "")
+              wx, wy    = ann["write_pos"]
+              tokens    = split_into_math_tokens(full_text)
+              k         = max(1, int(progress * len(tokens)))
+              partial   = "".join(tokens[:k])
+              draw_math_with_radicals(draw, wx, wy, partial, font, PEN_COLOR,full_text=full_text)
         elif action == "underline_existing":
             params = ann.get("underline_params")
             if params:
@@ -498,6 +516,8 @@ def render_video(
     schedule = _build_schedule(
         annotations, total_duration, enriched_ocr,
         option_positions, dummy, font,
+        background.size,
+        question_bbox,
     )
 
     frame_cache: dict = {}
