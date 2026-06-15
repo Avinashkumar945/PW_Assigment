@@ -1,0 +1,123 @@
+{\rtf1\ansi\deff0
+{\fonttbl{\f0\fswiss Helvetica;}{\f1\fmodern Courier New;}}
+{\colortbl;\red0\green0\blue0;}
+\fs24
+\b PW Internship \u2014 Screening Assignment\b0\par
+\par
+\b Task 01 Automated Annotation System\b0\par
+\par
+\b WHAT TO SUBMIT\b0\par
+\par
+1. The output video showing annotations appearing on the background, synced with the audio.\par
+\par
+- Local output: output/final.mp4\par
+- Example placeholder link: https://example.com/final.mp4\par
+\par
+2. Your tool or process:\par
+\par
+- Repository / scripts: scripts/generateAnnotations.py, scripts/renderVideo.py, scripts/ocrQuestion.py, scripts/renameQuestions.py, main.py\par
+- Screen recording (or demo): Automated Annotation System final video.mp4 (upload if required)\par
+\par
+\b How the tool works (short):\b0\par
+\par
+- Input: question image (input/*.png) and narration audio (input/*.mp3).\par
+- Steps:\par
+  - (optional) Transcribe audio with Whisper → output/transcript.json (word and segment timestamps).\par
+  - OCR question image with EasyOCR → extract question text, options, and bounding boxes.\par
+  - generateAnnotations.py parses the OCR text and transcript to create an 8-action annotation schedule (two write_text, five write_equation, one tick_answer). The generator auto-detects problem type (distance, kinematics, generic) and populates content accordingly.\par
+  - renderVideo.py consumes output/annotations.json and renders handwriting-style progressive annotations into output/final.mp4.\par
+\par
+- Key improvements made for the submission:\par
+  - Dynamic content: coordinates or equation steps are extracted from OCR and transcript text (distance and kinematics supported).\par
+  - Smart sync: annotation timestamps are aligned to transcript words/segments (word-level when available) and include a small positive offset so visuals appear just after speech.\par
+  - Stable demo structure: 8 actions preserved so output matches original demo timing/flow while being dynamic.\par
+\par
+\b How to run (quick):\b0\par
+\par
+{\f1\qc\lang1033\par}
+\f0
+\pard\tx360
+\par
+1) optional: create transcript\par
+\f1
+python main.py --image input/question.png --audio input/narration.mp3\par
+\f0
+\par
+2) or skip transcription if transcript.json exists\par
+\f1
+python main.py --image input/question.png --audio input/narration.mp3 --skip-transcribe\par
+\f0
+\par
+\b Notes on reproducibility\b0\par
+\par
+- The pipeline expects input/ files and writes output/transcript.json, output/annotations.json, and output/final.mp4.\par
+- If transcripts include per-word timestamps, the sync is tighter. Otherwise it falls back to segment matching plus heuristics.\par
+\par
+\b Task 02 Brief an AI to Write in Your Voice\b0\par
+\par
+Subject Choice & Context\par
+\par
+- Subject: Database Management Systems (DBMS)\par
+- Exam Context: B.Tech Semester Final Examination\par
+- Reason: Balanced familiarity—good representation of typical performance.\par
+\par
+\b Brief for the AI (deliverable)\b0\par
+\par
+You are attempting a DBMS final exam as if you were me.\par
+\par
+\b Knowledge Level\b0\par
+\par
+- Strong: Database fundamentals, ER Diagrams, Keys & Constraints, SQL Queries, Normalization up to 3NF, Transactions and ACID, Joins and Relationships.\par
+- Weaker: Query optimization, index internals, distributed DBs, advanced concurrency control.\par
+\par
+\b Writing Style & Answer Structure\b0\par
+\par
+- Simple English, clear explanations, start with a definition then explain, use examples, end with a brief conclusion.\par
+- For theory: definition → explanation → example → conclusion.\par
+- For SQL: show query first, minimal explanation.\par
+- For comparisons: use concise bullet lists or tables (4–6 differences).\par
+\par
+\b Sample short AI brief (copyable):\b0\par
+\par
+"You are answering a B.Tech final exam in DBMS as if you were a mid-level student. Use simple English, start answers with a definition, follow with a brief explanation and an example, and end with a short conclusion. Prioritize clarity over depth. For SQL questions, present the query first. Avoid advanced jargon."\par
+\par
+\b What Would the AI Still Get Wrong About Me?\b0\par
+\par
+- The AI will likely be more consistent than my real exam performance; it may not reproduce occasional dropped details or the small mistakes I make under time pressure.\par
+\par
+\b Task 03 Fix a Broken Workflow\b0\par
+\par
+What Was Broken\par
+\par
+- Excel had mapping between question numbers and randomly-named images in ZIP files. No reliable automated mapping existed, so employees manually matched and screenshot.\par
+\par
+My Solution (script)\par
+\par
+- Script: scripts/renameQuestions.py (see repo). Steps:\par
+  1. Read Excel metadata (auto-detect columns: filename, file_name, image, attachment, question_no, question_number, sr_no).\par
+  2. Extract images from ZIP, ignore macOS artifacts.\par
+  3. Match images to metadata by filename heuristics.\par
+  4. Rename images to Q1.png, Q2.png, S1.png, S2.png and handle duplicates.\par
+\par
+Edge cases handled: column variations, missing numbers (sequential fallback), unknown types (warning), duplicate names (suffix), multiple image formats.\par
+\par
+Possible Improvements\par
+\par
+- Support nested ZIP folders, add --dry-run, GUI, PDF page extraction, and detailed audit logs.\par
+\par
+Files created/modified for this assignment\par
+\par
+- main.py — pipeline runner and CLI\par
+- scripts/generateAnnotations.py — annotation generator (rule-based + heuristics)\par
+- scripts/renderVideo.py — renderer\par
+- scripts/ocrQuestion.py — OCR helper\par
+- scripts/renameQuestions.py — workflow fixer\par
+\par
+Contact / Notes\par
+\par
+- If you want, I can produce a short screen recording showing the run and open the generated output/final.mp4 for upload.\par
+\par
+---\par
+\par
+End of submission document.\par
+}

@@ -76,6 +76,8 @@ def main():
                         help="Path to save/load Whisper transcript JSON")
     parser.add_argument("--annotations",     default="output/annotations.json",
                         help="Path to save/load annotations JSON")
+    parser.add_argument("--demo-annotations", action="store_true",
+                        help="Use demo hardcoded annotations instead of LLM/rules fallback")
     parser.add_argument("--whisper-model",   default="base",
                         help="Whisper model size: tiny | base | small | medium | large")
     parser.add_argument("--skip-transcribe", action="store_true",
@@ -109,6 +111,7 @@ def main():
         question_text,
         args.annotations,
         audio_duration=audio_duration,
+        demo=args.demo_annotations,
     )
 
     # ── Step 4: Render video ──────────────────────────────────────────────────

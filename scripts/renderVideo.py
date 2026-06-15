@@ -295,13 +295,27 @@ def _build_schedule(
         rx1, ry1, rx2, ry2 = 200, 420, 1150, 630
 
     img_w, img_h = image_size if image_size else (rx2, ry2)
-    centered_x   = int(img_w * 0.32)
-    # centered_y   = int(img_h * 0.16)
-    centered_y   = int(img_h * 0.16)-2
-    wx           = min(max(centered_x, rx1 + 20), max(rx2 - 220, rx1 + 20))
-    wy           = centered_y
-    # wy          = max(ry1 + 20, centered_y)
     LINE_GAP      = 62
+
+    # Determine write area inside the free space (prefer blank area)
+    padding = 10
+    write_x1 = rx1 + padding
+    write_y1 = ry1 + padding
+    write_x2 = rx2 - padding
+    write_y2 = ry2 - padding
+
+    # Fallback centered area when no meaningful free space
+    if (write_x2 - write_x1) < 80 or (write_y2 - write_y1) < 40:
+        centered_x = int(img_w * 0.32)
+        centered_y = int(img_h * 0.16) - 2
+        wx = min(max(centered_x, rx1 + 20), max(rx2 - 220, rx1 + 20))
+        wy = centered_y
+    else:
+        wx = write_x1
+        wy = write_y1
+
+    # Column wrap width for multiple columns inside free space
+    column_width = min(220, write_x2 - write_x1)
 
     schedule = []
 
@@ -326,6 +340,10 @@ def _build_schedule(
             entry["write_duration"] = write_dur
             entry["write_end"]      = t + write_dur
             wy += LINE_GAP
+            # Wrap to next column if exceeding free space
+            if 'write_y2' in locals() and wy > write_y2:
+                wy = write_y1
+                wx = min(wx + column_width, write_x2 - 20)
 
         elif action == "write_text":
             tokens    = ann.get("text", "").split()
@@ -335,6 +353,9 @@ def _build_schedule(
             entry["write_duration"] = write_dur
             entry["write_end"]      = t + write_dur
             wy += LINE_GAP
+            if 'write_y2' in locals() and wy > write_y2:
+                wy = write_y1
+                wx = min(wx + column_width, write_x2 - 20)
 
         elif action == "underline_existing":
             target = ann.get("target", "")
@@ -502,6 +523,13 @@ def render_video(
     enriched_ocr     = enriched_ocr or {}
 
     background = Image.open(image_path).convert("RGB")
+    # Ensure dimensions are even (yuv420p requires even width/height)
+    bw, bh = background.size
+    ew, eh = bw + (bw % 2), bh + (bh % 2)
+    if (ew, eh) != (bw, bh):
+        bg2 = Image.new("RGB", (ew, eh), (255, 255, 255))
+        bg2.paste(background, (0, 0))
+        background = bg2
 
     with open(annotations_path, "r", encoding="utf-8") as f:
         annotations = json.load(f)
@@ -533,18 +561,47 @@ def render_video(
 
     print(f"  Rendering {total_duration:.1f}s at {TARGET_FPS} fps...")
 
+    # Diagnostic: render a sample frame to verify shape/dtype
+    sample = make_frame(0.1)
+    try:
+        print(f"  Sample frame: shape={sample.shape}, dtype={sample.dtype}, min={sample.min()}, max={sample.max()}")
+    except Exception:
+        pass
+
     video = VideoClip(make_frame, duration=total_duration).with_fps(TARGET_FPS)
     video = video.with_effects([vfx.FadeIn(0.6), vfx.FadeOut(0.6)])
     video = video.with_audio(audio)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    video.write_videofile(
-        output_path,
-        fps=TARGET_FPS,
-        codec="libx264",
-        audio_codec="aac",
-        logger="bar",
-    )
+    # Prefer H.264 with a yuv420p pixel format for maximum player compatibility.
+    try:
+        video.write_videofile(
+            output_path,
+            fps=TARGET_FPS,
+            codec="libx264",
+            audio_codec="aac",
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-movflags", "+faststart",
+            ],
+            logger="bar",
+        )
+    except Exception as e:
+        # Fallback to a more widely-available codec if libx264/aac is not present
+        print(f"Primary encoding failed: {e}. Falling back to MPEG4.")
+        video.write_videofile(
+            output_path,
+            fps=TARGET_FPS,
+            codec="mpeg4",
+            audio_codec="libmp3lame",
+            ffmpeg_params=[
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+            ],
+            logger="bar",
+        )
     print(f"  Done → {output_path}")
 
 

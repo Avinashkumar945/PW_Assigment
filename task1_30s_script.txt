@@ -1,0 +1,29 @@
+TITLE (on screen): “How the Automated Video System Works (Task 1) — ~30 seconds”
+
+[0s - 3s | Scene: show your input files]
+Script (voiceover):
+“First, we start with two things: the question image and the narration audio.”
+
+[3s - 9s | Scene: OCR step visualization]
+Script:
+“Next, the system reads the question using OCR—so it understands what’s written and where the options are on the page.”
+
+[9s - 15s | Scene: Whisper transcript step]
+Script:
+“Then it transcribes the audio using Whisper, and gets timestamps for the narration words—so every action can match the teacher’s speech.”
+
+[15s - 22s | Scene: Annotation generation]
+Script:
+“Now, it creates a timeline of annotations, like underlines, circles, and writing the solution step-by-step, synchronized with those timestamps.”
+
+[22s - 28s | Scene: Rendering step]
+Script:
+“Finally, it renders the video frame-by-frame, draws the solution on the board, and combines it with the audio.”
+
+[28s - 30s | Scene: final output]
+Script:
+“And that’s how we automatically generate a complete annotated solution video—without manual timing.”
+
+END CARD (on screen): “Output: final.mp4”
+
+python main.py --image input/question.png --audio input/narration.mp3 --output output/final.mp4

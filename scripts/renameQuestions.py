@@ -23,6 +23,14 @@ import zipfile
 import pandas as pd
 
 
+def _is_numeric_column(df, col):
+    values = [str(x).strip() for x in df[col].dropna()]
+    if not values:
+        return False
+    numeric = sum(1 for v in values if re.fullmatch(r"\d+", v))
+    return numeric >= max(1, len(values) // 2)
+
+
 def find_mapping_columns(df):
     """
     Auto-detect filename and question-number columns from Excel headers.
@@ -32,20 +40,29 @@ def find_mapping_columns(df):
     Regex patterns catch all common variations so the script doesn't break
     every time the column name changes slightly.
     """
+    # Defensive: if no dataframe provided, return no columns
+    if df is None:
+        return None, None, None
+
     filename_patterns = [
+        r"question\s*image", r"question\s*img", r"question.*image",
         r"file\s*name", r"image\s*name", r"image", r"file",
         r"source", r"path", r"attachment",
     ]
+    sol_filename_patterns = [
+        r"sol\s*image", r"solution\s*image", r"answer\s*image",
+        r"sol\s*img", r"solution.*image",
+    ]
     question_patterns = [
-        r"question\s*(no|num|number|id)?", r"q\s*\.?\s*(no|num|number|id)?",
+        r"display\s*order", r"question\s*(no|num|number|id)?", r"q\s*\.?\s*(no|num|number|id)?",
         r"sr\s*\.?\s*(no|num)?", r"serial", r"number", r"id", r"sl\s*\.?\s*no",
-        r"display\s*order",   # PW internal format uses "Display Order*"
     ]
 
     cols       = list(df.columns)
     cols_lower = [str(c).lower().strip() for c in cols]
 
     filename_col = None
+    sol_filename_col = None
     question_col = None
 
     for pat in filename_patterns:
@@ -56,6 +73,14 @@ def find_mapping_columns(df):
         if filename_col:
             break
 
+    for pat in sol_filename_patterns:
+        for i, c in enumerate(cols_lower):
+            if re.search(pat, c):
+                sol_filename_col = cols[i]
+                break
+        if sol_filename_col:
+            break
+
     for pat in question_patterns:
         for i, c in enumerate(cols_lower):
             if re.search(pat, c):
@@ -64,7 +89,19 @@ def find_mapping_columns(df):
         if question_col:
             break
 
-    return filename_col, question_col
+    if question_col and not _is_numeric_column(df, question_col):
+        for i, c in enumerate(cols_lower):
+            if _is_numeric_column(df, cols[i]):
+                question_col = cols[i]
+                break
+
+    if question_col is None:
+        for i, c in enumerate(cols_lower):
+            if _is_numeric_column(df, cols[i]):
+                question_col = cols[i]
+                break
+
+    return filename_col, sol_filename_col, question_col
 
 
 def detect_type(filename, row_data=None):
@@ -121,45 +158,64 @@ def rename_questions(zip_path, excel_path, output_dir):
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Read Excel
-    print(f"  Reading: {excel_path}")
-    xls = pd.ExcelFile(excel_path)
-    df  = None
-    for sheet in xls.sheet_names:
-        candidate = pd.read_excel(xls, sheet_name=sheet)
-        if len(candidate) > 0 and len(candidate.columns) >= 2:
-            df = candidate
-            print(f"  Sheet: '{sheet}' — {len(df)} rows, {len(df.columns)} cols")
-            break
+    df = None
+    if excel_path:
+        # Read Excel
+        print(f"  Reading: {excel_path}")
+        try:
+            xls = pd.ExcelFile(excel_path)
+        except Exception as exc:
+            print(f"  ERROR: Failed to open Excel: {exc}")
+            return []
+        for sheet in xls.sheet_names:
+            candidate = pd.read_excel(xls, sheet_name=sheet)
+            if len(candidate) > 0 and len(candidate.columns) >= 2:
+                df = candidate
+                print(f"  Sheet: '{sheet}' — {len(df)} rows, {len(df.columns)} cols")
+                break
 
-    if df is None:
-        print("  ERROR: No usable sheet found in Excel.")
-        return []
+        if df is None:
+            print("  ERROR: No usable sheet found in Excel.")
+            return []
+    else:
+        print("  No Excel provided: running in inference-only mode (heuristics will be used)")
 
-    # Detect columns
-    filename_col, question_col = find_mapping_columns(df)
-
-    if not filename_col:
-        filename_col = df.columns[0]
-        print(f"  WARNING: Could not detect filename column — using '{filename_col}'")
-    if not question_col:
-        question_col = df.columns[1] if len(df.columns) >= 2 else None
-        print(f"  WARNING: Could not detect question ID column — using '{question_col}'")
-
-    print(f"  Filename col : '{filename_col}'")
-    print(f"  Question col : '{question_col}'")
-
-    # Build lookup: original filename -> (question_number, type)
+    # Detect columns and build mapping only when we have Excel data
     file_to_info = {}
-    for _, row in df.iterrows():
-        name = str(row[filename_col]).strip()
-        if not name or name.lower() == "nan":
-            continue
-        q_num  = extract_question_number(row[question_col]) if question_col else None
-        ftype  = detect_type(name, row)
-        file_to_info[name] = (q_num, ftype)
+    if df is not None:
+        filename_col, sol_filename_col, question_col = find_mapping_columns(df)
 
-    print(f"  Mappings found: {len(file_to_info)}")
+        if not filename_col:
+            filename_col = df.columns[0]
+            print(f"  WARNING: Could not detect question filename column — using '{filename_col}'")
+        if not sol_filename_col:
+            print("  WARNING: Could not detect solution filename column — will infer from question names if needed")
+        if not question_col:
+            question_col = df.columns[1] if len(df.columns) >= 2 else None
+            print(f"  WARNING: Could not detect question ID column — using '{question_col}'")
+
+        print(f"  Question filename col : '{filename_col}'")
+        print(f"  Solution filename col : '{sol_filename_col}'")
+        print(f"  Question col          : '{question_col}'")
+
+        # Build lookup: original filename -> (question_number, type)
+        for _, row in df.iterrows():
+            q_num  = extract_question_number(row[question_col]) if question_col else None
+
+            # Map question images
+            qname = str(row[filename_col]).strip() if filename_col in row else ""
+            if qname and qname.lower() != "nan":
+                file_to_info[qname] = (q_num, "Q")
+
+            # Map solution images if present
+            if sol_filename_col and sol_filename_col in row:
+                sname = str(row[sol_filename_col]).strip()
+                if sname and sname.lower() != "nan":
+                    file_to_info[sname] = (q_num, "S")
+
+        print(f"  Mappings found: {len(file_to_info)}")
+    else:
+        print("  No Excel mappings available — proceeding with filename heuristics only")
 
     # Extract ZIP and build filename lookup
     if not zipfile.is_zipfile(zip_path):
@@ -266,17 +322,21 @@ def main():
     )
     parser.add_argument("--zip",    default="input/questions.zip")
     parser.add_argument("--excel",  default="input/metadata.xlsx")
+    parser.add_argument("--infer", action="store_true",
+                        help="Run without Excel: infer Q/S numbers from filenames (best-effort)")
     parser.add_argument("--output", default="output/renamed")
     args = parser.parse_args()
 
     if not os.path.exists(args.zip):
         print(f"ERROR: ZIP not found: {args.zip}")
         sys.exit(1)
-    if not os.path.exists(args.excel):
-        print(f"ERROR: Excel not found: {args.excel}")
+
+    excel_path = args.excel if os.path.exists(args.excel) else None
+    if excel_path is None and not args.infer:
+        print(f"ERROR: Excel not found: {args.excel}\nIf you want to run without the Excel, re-run with --infer to use filename heuristics.")
         sys.exit(1)
 
-    rename_questions(args.zip, args.excel, args.output)
+    rename_questions(args.zip, excel_path, args.output)
 
 
 if __name__ == "__main__":
