@@ -41,7 +41,7 @@ def ease_in_out(t: float) -> float:
 
 
 # ── Font loader ──────────────────────────────────────────────────────────────
-def _find_font(family: str = "body", size: int = 26) -> ImageFont.FreeTypeFont:
+def _find_font(family: str = "body", size: int = 30) -> ImageFont.FreeTypeFont:
     candidates = {
         "title": [
             "C:/Windows/Fonts/Inkfree.ttf",
@@ -70,13 +70,88 @@ def _find_font(family: str = "body", size: int = 26) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size=size)
 
 
+# ── Math preprocessor ────────────────────────────────────────────────────────
+_SUP_MAP = {
+    '0': '\u2070', '1': '\u00b9', '2': '\u00b2', '3': '\u00b3',
+    '4': '\u2074', '5': '\u2075', '6': '\u2076', '7': '\u2077',
+    '8': '\u2078', '9': '\u2079',
+}
+
+_SUB_MAP = {
+    '0': '\u2080', '1': '\u2081', '2': '\u2082', '3': '\u2083',
+    '4': '\u2084', '5': '\u2085', '6': '\u2086', '7': '\u2087',
+    '8': '\u2088', '9': '\u2089',
+}
+
+def _preprocess_math(text: str) -> str:
+    """
+    Convert math notation to Unicode:
+      ^N / ^{N}           -> superscript  (x^2  -> x\u00b2)
+      _N / _{N}           -> subscript    (x_2  -> x\u2082)
+      single letter+digit -> subscript    (x2   -> x\u2082, y1 -> y\u2081)
+    """
+    result = []
+    i = 0
+    while i < len(text):
+        ch = text[i]
+
+        # Superscript: ^N or ^{N...}
+        if ch == '^' and i + 1 < len(text):
+            j = i + 1
+            braced = j < len(text) and text[j] == '{'
+            if braced:
+                j += 1
+            digits = []
+            while j < len(text) and text[j].isdigit():
+                digits.append(_SUP_MAP.get(text[j], text[j]))
+                j += 1
+            if braced and j < len(text) and text[j] == '}':
+                j += 1
+            if digits:
+                result.extend(digits)
+                i = j
+                continue
+
+        # Subscript: _N or _{N...}
+        elif ch == '_' and i + 1 < len(text):
+            j = i + 1
+            braced = j < len(text) and text[j] == '{'
+            if braced:
+                j += 1
+            digits = []
+            while j < len(text) and text[j].isdigit():
+                digits.append(_SUB_MAP.get(text[j], text[j]))
+                j += 1
+            if braced and j < len(text) and text[j] == '}':
+                j += 1
+            if digits:
+                result.extend(digits)
+                i = j
+                continue
+
+        # Auto-subscript: single letter immediately followed by a digit (x2, y1, t3...)
+        elif ch.isalpha() and i + 1 < len(text) and text[i + 1].isdigit():
+            prev = result[-1] if result else ''
+            if not prev.isdigit():
+                result.append(ch)
+                result.append(_SUB_MAP.get(text[i + 1], text[i + 1]))
+                i += 2
+                continue
+
+        result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
 # ── Tokenizer ────────────────────────────────────────────────────────────────
 def split_into_math_tokens(text: str) -> list:
     """
     Split equation into meaningful tokens, filtering whitespace-only tokens
     so they don't waste reveal slots.
+    Automatically converts ^N notation to Unicode superscripts first.
     """
-    raw = re.findall(r'[A-Za-z0-9₀-₉⁰-⁹]+|\s+|[^\w\s]', text)
+    text = _preprocess_math(text)
+    raw = re.findall(r'[A-Za-z0-9\u2070-\u2079\u00b9\u00b2\u00b3\u2080-\u2089]+|\s+|[^\w\s]', text)
     return [t for t in raw if t.strip()]
 
 
@@ -216,8 +291,8 @@ def draw_math_with_radicals(draw, x, y, text, font, color, full_text=None):
           return
 
       fs     = font.size
-      tail_h = int(fs * 0.55)
-      head_h = int(fs * 0.85)
+      tail_h = int(fs * 0.40)
+      head_h = int(fs * 1)
       tick_w = int(fs * 0.55)
 
       parts     = text.split("√")
@@ -314,8 +389,8 @@ def _build_schedule(
         wx = write_x1
         wy = write_y1
 
-    # Column wrap width for multiple columns inside free space
-    column_width = min(220, write_x2 - write_x1)
+    COL_GAP      = 24          # px gap between columns
+    max_col_width = 0      # tracks widest line in the current column
 
     schedule = []
 
@@ -339,11 +414,15 @@ def _build_schedule(
             entry["write_pos"]      = (wx, wy)
             entry["write_duration"] = write_dur
             entry["write_end"]      = t + write_dur
+            # Track how wide this line is
+            line_w = text_width(draw_ref, _preprocess_math(ann.get("text", "")), font)
+            max_col_width = max(max_col_width+20, int(line_w))
             wy += LINE_GAP
             # Wrap to next column if exceeding free space
             if 'write_y2' in locals() and wy > write_y2:
                 wy = write_y1
-                wx = min(wx + column_width, write_x2 - 20)
+                wx = min(wx + max_col_width + COL_GAP, write_x2 - 20)
+                max_col_width = 0   # reset for new column
 
         elif action == "write_text":
             tokens    = ann.get("text", "").split()
@@ -352,10 +431,14 @@ def _build_schedule(
             entry["write_pos"]      = (wx, wy)
             entry["write_duration"] = write_dur
             entry["write_end"]      = t + write_dur
+            # Track how wide this line is
+            line_w = text_width(draw_ref, ann.get("text", ""), font)
+            max_col_width = max(max_col_width, int(line_w))
             wy += LINE_GAP
             if 'write_y2' in locals() and wy > write_y2:
                 wy = write_y1
-                wx = min(wx + column_width, write_x2 - 20)
+                wx = min(wx + max_col_width + COL_GAP, write_x2 - 20)
+                max_col_width = 0   # reset for new column
 
         elif action == "underline_existing":
             target = ann.get("target", "")
@@ -534,7 +617,7 @@ def render_video(
     with open(annotations_path, "r", encoding="utf-8") as f:
         annotations = json.load(f)
 
-    font  = _find_font("body", 28)
+    font  = _find_font("body",35)
     fonts = (font,)
 
     audio          = AudioFileClip(audio_path)
@@ -602,7 +685,7 @@ def render_video(
             ],
             logger="bar",
         )
-    print(f"  Done → {output_path}")
+    print(f"  Done -> {output_path}")
 
 
 if __name__ == "__main__":

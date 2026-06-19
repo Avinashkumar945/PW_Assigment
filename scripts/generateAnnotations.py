@@ -369,10 +369,11 @@ def generate_rule_based(transcript_data: dict, audio_duration: float, question_t
         dx = x2 - x1
         dy = y2 - y1
         dist_sq = dx * dx + dy * dy
+        
         eq_texts = [
-            "d = √((x2-x1)^2 + (y2-y1)^2)",
-            f"d = √(({x2}-{x1})^2 + ({y2}-{y1})^2)",
-            f"d = √({dx}^2 + {dy}^2)",
+            "d = √((x₂-x₁)² + (y₂-y₁)²)",
+            f"d = √(({x2}-{x1})² + ({y2}-{y1})²)",
+            f"d = √({dx}² + {dy}²)",
             f"d = √({dx*dx} + {dy*dy}) = √{dist_sq}",
             "d = 5" if dist_sq == 25 else f"d = √{dist_sq}"
         ]

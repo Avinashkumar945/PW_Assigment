@@ -126,7 +126,7 @@ def main():
         enriched_ocr,
     )
 
-    print(f"\n✓ Done! Video saved to: {os.path.abspath(args.output)}")
+    print(f"\n[DONE] Video saved to: {os.path.abspath(args.output)}")
 
 
 if __name__ == "__main__":
